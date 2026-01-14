@@ -1,0 +1,67 @@
+services:
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: minio
+      MINIO_ROOT_PASSWORD: minio12345
+    volumes:
+      - minio_data:/data
+
+  mc:
+    image: minio/mc:latest
+    depends_on:
+      - minio
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 minio minio12345 &&
+      mc mb --ignore-existing local/mlops-dvc &&
+      mc mb --ignore-existing local/zenml-artifacts &&
+      mc mb --ignore-existing local/mlflow &&
+      echo 'Buckets OK (mlops-dvc, zenml-artifacts, mlflow)' "
+  
+  mlflow:
+    image: python:3.11-slim
+    depends_on:
+      - minio
+    ports:
+      - "5000:5000"
+    environment:
+      AWS_ACCESS_KEY_ID: minio
+      AWS_SECRET_ACCESS_KEY: minio12345
+      MLFLOW_S3_ENDPOINT_URL: http://minio:9000
+    command: >
+      sh -c "pip install -q mlflow boto3 &&
+             mlflow server
+             --host 0.0.0.0 --port 5000
+             --backend-store-uri sqlite:////mlflow/mlflow.db
+             --default-artifact-root s3://mlflow"
+    volumes:
+      - mlflow_data:/mlflow
+
+  mysql:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: zenml
+    ports:
+      - "3307:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+
+  zenml-server:
+    image: zenmldocker/zenml-server:0.93.0
+    depends_on:
+      - mysql
+    ports:
+      - "8081:8080"
+    environment:
+      ZENML_STORE_URL: "mysql://root:root@mysql:3306/zenml"
+
+volumes:
+  minio_data:
+  mlflow_data:
+  mysql_data:
