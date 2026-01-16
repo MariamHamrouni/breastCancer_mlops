@@ -14,7 +14,7 @@ jobs:
       MLFLOW_TRACKING_URI: "http://localhost:5000"
       AWS_ACCESS_KEY_ID: "minio"
       AWS_SECRET_ACCESS_KEY: "minio12345"
-      MLFLOW_S3_ENDPOINT_URL: "http://localhost:9000"
+      MLFLOW_S3_ENDPOINT_URL: "http://minio:9000"
 
     services:
       minio:
@@ -32,7 +32,6 @@ jobs:
           --health-retries 15
         command: ["server", "/data", "--console-address", ":9001"]
 
-      # ✅ crée buckets (mlflow + zenml-artifacts) comme dans ta stack
       mc:
         image: minio/mc:latest
         env:
@@ -96,6 +95,7 @@ jobs:
           sleep 3
           curl -f http://localhost:8000/health
           tail -n 50 /tmp/api.log
+          pkill -f "uvicorn src.serving.app:app" || true
 
       - name: Build Docker image (serving)
         run: |
