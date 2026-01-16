@@ -48,11 +48,16 @@ jobs:
       # 2) Create bucket for MLflow artifacts
       - name: Create MinIO bucket (mlflow)
         run: |
-          docker run --rm --network host minio/mc:latest sh -c "
-            mc alias set local http://localhost:9000 $AWS_ACCESS_KEY_ID $AWS_SECRET_ACCESS_KEY &&
-            mc mb --ignore-existing local/mlflow &&
-            echo 'Bucket mlflow OK'
-          "
+          docker run --rm --network host \
+          --entrypoint mc \
+          minio/mc:latest alias set local http://localhost:9000 $AWS_ACCESS_KEY_ID $AWS_SECRET_ACCESS_KEY
+
+          docker run --rm --network host \
+          --entrypoint mc \
+          minio/mc:latest mb --ignore-existing local/mlflow
+
+          echo "Bucket mlflow OK"
+
 
       # 3) Start MLflow server
       - name: Start MLflow
