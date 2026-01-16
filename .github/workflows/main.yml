@@ -16,21 +16,6 @@ jobs:
       MLFLOW_S3_ENDPOINT_URL: "http://localhost:9000"
       MLFLOW_TRACKING_URI: "http://localhost:5000"
 
-    services:
-      minio:
-        image: minio/minio:latest
-        ports:
-          - 9000:9000
-          - 9001:9001
-        env:
-          MINIO_ROOT_USER: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          MINIO_ROOT_PASSWORD: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        options: >-
-          --health-cmd "curl -f http://localhost:9000/minio/health/live || exit 1"
-          --health-interval 5s
-          --health-timeout 3s
-          --health-retries 20
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -46,15 +31,31 @@ jobs:
           pip install -r requirements.txt
           pip install dvc[s3] optuna mlflow scikit-learn pandas joblib requests fastapi "uvicorn[standard]"
 
+      # 1) Start MinIO
+      - name: Start MinIO
+        run: |
+          docker run -d --name minio --network host \
+            -e MINIO_ROOT_USER=$AWS_ACCESS_KEY_ID \
+            -e MINIO_ROOT_PASSWORD=$AWS_SECRET_ACCESS_KEY \
+            minio/minio:latest server /data --console-address ":9001"
+          # wait until ready
+          for i in {1..30}; do
+            curl -fsS http://localhost:9000/minio/health/live && break
+            sleep 2
+          done
+          curl -f http://localhost:9000/minio/health/live
+
+      # 2) Create bucket for MLflow artifacts
       - name: Create MinIO bucket (mlflow)
         run: |
-          docker run --rm --network host minio/mc:latest sh -c '
+          docker run --rm --network host minio/mc:latest sh -c "
             mc alias set local http://localhost:9000 $AWS_ACCESS_KEY_ID $AWS_SECRET_ACCESS_KEY &&
             mc mb --ignore-existing local/mlflow &&
-            echo "Bucket mlflow OK"
-          '
+            echo 'Bucket mlflow OK'
+          "
 
-      - name: Start MLflow server (Docker)
+      # 3) Start MLflow server
+      - name: Start MLflow
         run: |
           docker run -d --name mlflow --network host \
             -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID \
@@ -65,7 +66,11 @@ jobs:
               --host 0.0.0.0 --port 5000 \
               --backend-store-uri sqlite:////tmp/mlflow.db \
               --default-artifact-root s3://mlflow
-          sleep 3
+          # wait until ready
+          for i in {1..30}; do
+            curl -fsS http://localhost:5000 && break
+            sleep 2
+          done
           curl -f http://localhost:5000
 
       - name: DVC pull data (if remote configured)
@@ -83,7 +88,7 @@ jobs:
           nohup uvicorn src.serving.app:app --host 0.0.0.0 --port 8000 >/tmp/api.log 2>&1 &
           sleep 3
           curl -f http://localhost:8000/health
-          tail -n 60 /tmp/api.log
+          tail -n 80 /tmp/api.log
           pkill -f "uvicorn src.serving.app:app" || true
 
       - name: Build Docker image (serving)
@@ -100,4 +105,6 @@ jobs:
       - name: Cleanup
         if: always()
         run: |
-          docker rm -f mlflow api || true
+          docker logs minio --tail=50 || true
+          docker logs mlflow --tail=50 || true
+          docker rm -f api mlflow minio || true
