@@ -1,0 +1,109 @@
+name: MLOps CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+jobs:
+  build-train-test:
+    runs-on: ubuntu-latest
+
+    env:
+      PYTHON_VERSION: "3.11"
+      MLFLOW_TRACKING_URI: "http://localhost:5000"
+      AWS_ACCESS_KEY_ID: "minio"
+      AWS_SECRET_ACCESS_KEY: "minio12345"
+      MLFLOW_S3_ENDPOINT_URL: "http://localhost:9000"
+
+    services:
+      minio:
+        image: minio/minio:latest
+        ports:
+          - 9000:9000
+          - 9001:9001
+        env:
+          MINIO_ROOT_USER: minio
+          MINIO_ROOT_PASSWORD: minio12345
+        options: >-
+          --health-cmd "curl -f http://localhost:9000/minio/health/live || exit 1"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 15
+        command: ["server", "/data", "--console-address", ":9001"]
+
+      # ✅ crée buckets (mlflow + zenml-artifacts) comme dans ta stack
+      mc:
+        image: minio/mc:latest
+        env:
+          MINIO_ROOT_USER: minio
+          MINIO_ROOT_PASSWORD: minio12345
+        options: >-
+          --entrypoint /bin/sh
+        command: >
+          -c "
+          mc alias set local http://minio:9000 minio minio12345 &&
+          mc mb --ignore-existing local/mlflow &&
+          echo 'Buckets OK' "
+
+      mlflow:
+        image: ghcr.io/mlflow/mlflow:latest
+        ports:
+          - 5000:5000
+        env:
+          AWS_ACCESS_KEY_ID: minio
+          AWS_SECRET_ACCESS_KEY: minio12345
+          MLFLOW_S3_ENDPOINT_URL: http://minio:9000
+        options: >-
+          --health-cmd "curl -f http://localhost:5000 || exit 1"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+        command: >
+          mlflow server
+          --host 0.0.0.0 --port 5000
+          --backend-store-uri sqlite:////tmp/mlflow.db
+          --default-artifact-root s3://mlflow
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install dvc[s3] optuna mlflow scikit-learn pandas joblib requests fastapi "uvicorn[standard]"
+
+      - name: DVC pull data (if remote configured)
+        run: |
+          dvc --version
+          dvc pull || echo "No DVC remote / nothing to pull"
+
+      - name: Train baseline + export models
+        run: |
+          python src/serving/export_models.py
+
+      - name: Start API (uvicorn) & test /health
+        run: |
+          export MODEL_PATH=models/production/model.joblib
+          nohup uvicorn src.serving.app:app --host 0.0.0.0 --port 8000 >/tmp/api.log 2>&1 &
+          sleep 3
+          curl -f http://localhost:8000/health
+          tail -n 50 /tmp/api.log
+
+      - name: Build Docker image (serving)
+        run: |
+          docker build -f docker/serving.Dockerfile -t breastcancer-api:ci .
+
+      - name: Run container & test /health
+        run: |
+          docker run -d --name api -p 8000:8000 breastcancer-api:ci
+          sleep 3
+          curl -f http://localhost:8000/health
+          docker logs api --tail=80
